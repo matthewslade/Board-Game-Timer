@@ -39,12 +39,13 @@ import androidx.compose.material.icons.filled.ArrowBack
 import androidx.navigation.compose.NavHost
 import androidx.navigation.compose.composable
 import androidx.navigation.compose.rememberNavController
+import androidx.lifecycle.viewmodel.compose.viewModel
 
 class MainActivity : ComponentActivity() {
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
         setContent {
-            MaterialTheme(colorScheme = lightColorScheme()) {
+            MaterialTheme(colorScheme = darkColorScheme()) {
                 AppRoot()
             }
         }
@@ -108,7 +109,7 @@ private val SettingsSaver = mapSaver(
 fun SettingsScreen(initial: Settings, onStart: (Settings) -> Unit) {
     var turn by rememberSaveable { mutableStateOf(initial.turnMinutes.toString()) }
     var reserve by rememberSaveable { mutableStateOf(initial.reserveMinutes.toString()) }
-    var count by rememberSaveable { mutableStateOf(initial.playerCount) }
+    var count by rememberSaveable { mutableIntStateOf(initial.playerCount) }
     var bankUnusedTime by rememberSaveable { mutableStateOf(initial.bankUnusedTime) }
     var names by rememberSaveable(stateSaver = listSaver(
         save = { it },
@@ -254,11 +255,13 @@ fun GameScreen(settings: Settings, onBack: () -> Unit) {
         ToneGenerator(AudioManager.STREAM_NOTIFICATION, ToneGenerator.MAX_VOLUME)
     }
     
-    val viewModel = remember(settings, toneGenerator) {
-        GameTimerViewModel(settings, toneGenerator)
-    }
+    val viewModel: GameTimerViewModel = viewModel(
+        factory = GameTimerViewModelFactory(settings, toneGenerator)
+    )
     
     val uiState by viewModel.uiState.collectAsState()
+    
+    var showExitDialog by remember { mutableStateOf(false) }
     
     DisposableEffect(Unit) {
         // Keep screen on during game
@@ -271,9 +274,34 @@ fun GameScreen(settings: Settings, onBack: () -> Unit) {
         }
     }
 
+    if (showExitDialog) {
+        AlertDialog(
+            onDismissRequest = { showExitDialog = false },
+            title = { Text("Exit Game?") },
+            text = { Text("Are you sure you want to exit the current game? All progress will be lost.") },
+            confirmButton = {
+                TextButton(
+                    onClick = {
+                        showExitDialog = false
+                        onBack()
+                    }
+                ) {
+                    Text("Exit")
+                }
+            },
+            dismissButton = {
+                TextButton(
+                    onClick = { showExitDialog = false }
+                ) {
+                    Text("Cancel")
+                }
+            }
+        )
+    }
+
     GameScreenScaffold(
         isLandscape = isLandscape,
-        onBack = onBack,
+        onBack = { showExitDialog = true },
         players = uiState.players,
         activeIndex = uiState.activeIndex,
         onReserve = uiState.onReserve,
@@ -534,9 +562,9 @@ private fun PlayerSlot(
 ) {
     // Determine colors based on state
     val (baseColor, borderColor) = when {
-        isActive && isUsingReserve -> Color(0xFFFFEB3B) to Color(0xFFFF8F00) // Bright yellow for reserve time
-        isActive -> Color(0xFF4CAF50) to Color(0xFF2E7D32) // Bright green for active player
-        else -> Color(0xFFF6F6F6) to Color(0xFFBDBDBD) // Default gray
+        isActive && isUsingReserve -> Color(0xFFFF8F00) to Color(0xFFFFEB3B) // Bright yellow for reserve time
+        isActive -> Color(0xFF2E7D32) to Color(0xFF4CAF50) // Bright green for active player
+        else -> Color(0x00F6F6F6) to Color(0xFFBDBDBD) // Default gray
     }
     
     val infinite = rememberInfiniteTransition(label = "flash")

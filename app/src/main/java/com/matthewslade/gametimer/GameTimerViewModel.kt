@@ -2,6 +2,7 @@ package com.matthewslade.gametimer
 
 import android.media.ToneGenerator
 import androidx.lifecycle.ViewModel
+import androidx.lifecycle.ViewModelProvider
 import androidx.lifecycle.viewModelScope
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.delay
@@ -160,5 +161,18 @@ class GameTimerViewModel(
         super.onCleared()
         timerJob?.cancel()
         toneGenerator.release()
+    }
+}
+
+class GameTimerViewModelFactory(
+    private val settings: Settings,
+    private val toneGenerator: ToneGenerator
+) : ViewModelProvider.Factory {
+    @Suppress("UNCHECKED_CAST")
+    override fun <T : ViewModel> create(modelClass: Class<T>): T {
+        if (modelClass.isAssignableFrom(GameTimerViewModel::class.java)) {
+            return GameTimerViewModel(settings, toneGenerator) as T
+        }
+        throw IllegalArgumentException("Unknown ViewModel class")
     }
 }
