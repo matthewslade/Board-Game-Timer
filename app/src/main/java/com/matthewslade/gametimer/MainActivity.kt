@@ -21,6 +21,7 @@ import androidx.compose.foundation.lazy.grid.LazyVerticalGrid
 import androidx.compose.foundation.lazy.grid.itemsIndexed
 import androidx.compose.material3.*
 import androidx.compose.runtime.*
+import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.saveable.listSaver
 import androidx.compose.runtime.saveable.mapSaver
 import androidx.compose.runtime.saveable.rememberSaveable
@@ -38,7 +39,6 @@ import androidx.compose.material.icons.filled.ArrowBack
 import androidx.navigation.compose.NavHost
 import androidx.navigation.compose.composable
 import androidx.navigation.compose.rememberNavController
-import kotlinx.coroutines.delay
 
 class MainActivity : ComponentActivity() {
     override fun onCreate(savedInstanceState: Bundle?) {
@@ -135,7 +135,7 @@ fun SettingsScreen(initial: Settings, onStart: (Settings) -> Unit) {
     val isValid = turnInt > 0 && reserveInt >= 0 && count in 3..6 && names.all { it.isNotBlank() }
 
     Scaffold(
-        topBar = { TopAppBar(title = { Text("BoardGame Timer – Settings") }) }
+        topBar = { TopAppBar(title = { Text("Board Game Timer – Settings") }) }
     ) { inner ->
         Column(
             Modifier
@@ -242,14 +242,6 @@ fun SettingsScreen(initial: Settings, onStart: (Settings) -> Unit) {
     }
 }
 
-data class PlayerState(
-    val name: String,
-    val totalReserveMs: Long,
-    var remainingReserveMs: Long,
-    var totalUsedMs: Long = 0L,
-    var isOut: Boolean = false,
-)
-
 @SuppressLint("UnusedBoxWithConstraintsScope")
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
@@ -262,105 +254,34 @@ fun GameScreen(settings: Settings, onBack: () -> Unit) {
         ToneGenerator(AudioManager.STREAM_NOTIFICATION, ToneGenerator.MAX_VOLUME)
     }
     
+    val viewModel = remember(settings, toneGenerator) {
+        GameTimerViewModel(settings, toneGenerator)
+    }
+    
+    val uiState by viewModel.uiState.collectAsState()
+    
     DisposableEffect(Unit) {
         // Keep screen on during game
         val activity = context as ComponentActivity
         activity.window.addFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON)
         
         onDispose {
-            toneGenerator.release()
             // Remove keep screen on flag when leaving game screen
             activity.window.clearFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON)
         }
-    }
-    
-    val turnTotalMs = remember(settings.turnMinutes) { settings.turnMinutes * 60_000L }
-    var players by remember {
-        mutableStateOf(
-            settings.names.map {
-                PlayerState(
-                    name = it,
-                    totalReserveMs = settings.reserveMinutes * 60_000L,
-                    remainingReserveMs = settings.reserveMinutes * 60_000L,
-                )
-            }
-        )
-    }
-
-    var activeIndex by remember { mutableStateOf(0) }
-    var turnRemainingMs by remember { mutableStateOf(turnTotalMs) }
-    var running by remember { mutableStateOf(false) }
-    var onReserve by remember { mutableStateOf(false) }
-
-    LaunchedEffect(running, activeIndex, onReserve) {
-        while (running) {
-            delay(100L)
-            if (!onReserve) {
-                turnRemainingMs = (turnRemainingMs - 100L).coerceAtLeast(0L)
-                if (turnRemainingMs == 0L) onReserve = true
-            } else {
-                val p = players[activeIndex]
-                val newRes = (p.remainingReserveMs - 100L).coerceAtLeast(0L)
-                players = players.toMutableList().also {
-                    it[activeIndex] = it[activeIndex].copy(remainingReserveMs = newRes)
-                }
-                if (newRes == 0L) {
-                    players = players.toMutableList().also {
-                        it[activeIndex] = it[activeIndex].copy(isOut = true)
-                    }
-                    // Play sound when player runs out of time
-                    toneGenerator.startTone(ToneGenerator.TONE_CDMA_ALERT_CALL_GUARD, 500)
-                    running = false
-                }
-            }
-        }
-    }
-
-    fun pickPlayer(index: Int) {
-        // Calculate time used in this turn by current player
-        val currentPlayer = players[activeIndex]
-        val timeUsedThisTurn = if (!onReserve) {
-            // Time used from turn time
-            turnTotalMs - turnRemainingMs
-        } else {
-            // Full turn time was used, plus reserve time that was consumed this turn
-            // We need to track this more carefully - for now, let's just track turn time when switching
-            turnTotalMs - turnRemainingMs
-        }
-        
-        // Update current player's total used time and handle banking
-        players = players.toMutableList().also { playerList ->
-            val updatedPlayer = if (settings.bankUnusedTime && !onReserve && turnRemainingMs > 0) {
-                // Bank unused time and update total used time
-                currentPlayer.copy(
-                    remainingReserveMs = currentPlayer.remainingReserveMs + turnRemainingMs,
-                    totalUsedMs = currentPlayer.totalUsedMs + (turnTotalMs - turnRemainingMs)
-                )
-            } else {
-                // Just update total used time
-                currentPlayer.copy(
-                    totalUsedMs = currentPlayer.totalUsedMs + timeUsedThisTurn
-                )
-            }
-            playerList[activeIndex] = updatedPlayer
-        }
-        
-        activeIndex = index
-        turnRemainingMs = turnTotalMs
-        onReserve = false
     }
 
     GameScreenScaffold(
         isLandscape = isLandscape,
         onBack = onBack,
-        players = players,
-        activeIndex = activeIndex,
-        onReserve = onReserve,
-        pickPlayer = ::pickPlayer,
-        turnRemainingMs = turnRemainingMs,
-        running = running,
-        onToggle = { running = !running },
-        onResetTurn = { turnRemainingMs = turnTotalMs; onReserve = false }
+        players = uiState.players,
+        activeIndex = uiState.activeIndex,
+        onReserve = uiState.onReserve,
+        pickPlayer = viewModel::pickPlayer,
+        turnRemainingMs = uiState.turnRemainingMs,
+        running = uiState.running,
+        onToggle = viewModel::toggleTimer,
+        onResetTurn = viewModel::resetTurn
     )
 }
 
@@ -380,7 +301,7 @@ private fun GameScreenScaffold(
 ) {
     val topBar = @Composable {
         TopAppBar(
-            title = { Text("BoardGame Timer – Game") },
+            title = { Text("Board Game Timer") },
             navigationIcon = {
                 IconButton(onClick = onBack) { Icon(Icons.Default.ArrowBack, contentDescription = "Back") }
             }
