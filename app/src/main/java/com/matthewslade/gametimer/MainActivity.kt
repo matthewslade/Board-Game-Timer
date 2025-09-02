@@ -4,10 +4,13 @@ import android.annotation.SuppressLint
 import android.media.ToneGenerator
 import android.media.AudioManager
 import android.os.Bundle
+import android.view.WindowManager
 import androidx.activity.ComponentActivity
 import androidx.activity.compose.setContent
 import androidx.compose.animation.animateColor
 import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.platform.LocalConfiguration
+import android.content.res.Configuration
 import androidx.compose.animation.core.*
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
@@ -52,7 +55,8 @@ data class Settings(
     val turnMinutes: Int = 2,
     val reserveMinutes: Int = 1,
     val playerCount: Int = 3,
-    val names: List<String> = listOf("Player 1", "Player 2", "Player 3")
+    val names: List<String> = listOf("Player 1", "Player 2", "Player 3"),
+    val bankUnusedTime: Boolean = false
 )
 
 @Composable
@@ -84,7 +88,8 @@ private val SettingsSaver = mapSaver(
             "t" to s.turnMinutes,
             "r" to s.reserveMinutes,
             "c" to s.playerCount,
-            "n" to s.names
+            "n" to s.names,
+            "b" to s.bankUnusedTime
         )
     },
     restore = { map ->
@@ -92,7 +97,8 @@ private val SettingsSaver = mapSaver(
             turnMinutes = map["t"] as Int,
             reserveMinutes = map["r"] as Int,
             playerCount = map["c"] as Int,
-            names = (map["n"] as List<*>).filterIsInstance<String>()
+            names = (map["n"] as List<*>).filterIsInstance<String>(),
+            bankUnusedTime = map["b"] as? Boolean ?: false
         )
     }
 )
@@ -103,6 +109,7 @@ fun SettingsScreen(initial: Settings, onStart: (Settings) -> Unit) {
     var turn by rememberSaveable { mutableStateOf(initial.turnMinutes.toString()) }
     var reserve by rememberSaveable { mutableStateOf(initial.reserveMinutes.toString()) }
     var count by rememberSaveable { mutableStateOf(initial.playerCount) }
+    var bankUnusedTime by rememberSaveable { mutableStateOf(initial.bankUnusedTime) }
     var names by rememberSaveable(stateSaver = listSaver(
         save = { it },
         restore = { it.toMutableList() }
@@ -168,6 +175,22 @@ fun SettingsScreen(initial: Settings, onStart: (Settings) -> Unit) {
                 )
             }
 
+            Row(
+                modifier = Modifier.fillMaxWidth(),
+                verticalAlignment = Alignment.CenterVertically,
+                horizontalArrangement = Arrangement.spacedBy(12.dp)
+            ) {
+                Checkbox(
+                    checked = bankUnusedTime,
+                    onCheckedChange = { bankUnusedTime = it }
+                )
+                Text(
+                    text = "Bank unused turn time to reserve",
+                    fontSize = 18.sp,
+                    modifier = Modifier.weight(1f)
+                )
+            }
+
             Divider()
 
             Text(
@@ -202,7 +225,8 @@ fun SettingsScreen(initial: Settings, onStart: (Settings) -> Unit) {
                             turnMinutes = (turn.toIntOrNull() ?: 1).coerceAtLeast(1),
                             reserveMinutes = (reserve.toIntOrNull() ?: 0).coerceAtLeast(0),
                             playerCount = count,
-                            names = names.toList()
+                            names = names.toList(),
+                            bankUnusedTime = bankUnusedTime
                         )
                     )
                 },
@@ -222,6 +246,7 @@ data class PlayerState(
     val name: String,
     val totalReserveMs: Long,
     var remainingReserveMs: Long,
+    var totalUsedMs: Long = 0L,
     var isOut: Boolean = false,
 )
 
@@ -230,13 +255,22 @@ data class PlayerState(
 @Composable
 fun GameScreen(settings: Settings, onBack: () -> Unit) {
     val context = LocalContext.current
+    val configuration = LocalConfiguration.current
+    val isLandscape = configuration.orientation == Configuration.ORIENTATION_LANDSCAPE
+    
     val toneGenerator = remember { 
         ToneGenerator(AudioManager.STREAM_NOTIFICATION, ToneGenerator.MAX_VOLUME)
     }
     
     DisposableEffect(Unit) {
+        // Keep screen on during game
+        val activity = context as ComponentActivity
+        activity.window.addFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON)
+        
         onDispose {
             toneGenerator.release()
+            // Remove keep screen on flag when leaving game screen
+            activity.window.clearFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON)
         }
     }
     
@@ -283,55 +317,161 @@ fun GameScreen(settings: Settings, onBack: () -> Unit) {
     }
 
     fun pickPlayer(index: Int) {
+        // Calculate time used in this turn by current player
+        val currentPlayer = players[activeIndex]
+        val timeUsedThisTurn = if (!onReserve) {
+            // Time used from turn time
+            turnTotalMs - turnRemainingMs
+        } else {
+            // Full turn time was used, plus reserve time that was consumed this turn
+            // We need to track this more carefully - for now, let's just track turn time when switching
+            turnTotalMs - turnRemainingMs
+        }
+        
+        // Update current player's total used time and handle banking
+        players = players.toMutableList().also { playerList ->
+            val updatedPlayer = if (settings.bankUnusedTime && !onReserve && turnRemainingMs > 0) {
+                // Bank unused time and update total used time
+                currentPlayer.copy(
+                    remainingReserveMs = currentPlayer.remainingReserveMs + turnRemainingMs,
+                    totalUsedMs = currentPlayer.totalUsedMs + (turnTotalMs - turnRemainingMs)
+                )
+            } else {
+                // Just update total used time
+                currentPlayer.copy(
+                    totalUsedMs = currentPlayer.totalUsedMs + timeUsedThisTurn
+                )
+            }
+            playerList[activeIndex] = updatedPlayer
+        }
+        
         activeIndex = index
         turnRemainingMs = turnTotalMs
         onReserve = false
     }
 
-    Scaffold(
-        topBar = {
-            TopAppBar(
-                title = { Text("BoardGame Timer – Game") },
-                navigationIcon = {
-                    IconButton(onClick = onBack) { Icon(Icons.Default.ArrowBack, contentDescription = "Back") }
-                }
-            )
-        },
-        bottomBar = {
-            ControlsBar(
-                turnRemainingMs = turnRemainingMs,
+    GameScreenScaffold(
+        isLandscape = isLandscape,
+        onBack = onBack,
+        players = players,
+        activeIndex = activeIndex,
+        onReserve = onReserve,
+        pickPlayer = ::pickPlayer,
+        turnRemainingMs = turnRemainingMs,
+        running = running,
+        onToggle = { running = !running },
+        onResetTurn = { turnRemainingMs = turnTotalMs; onReserve = false }
+    )
+}
+
+@OptIn(ExperimentalMaterial3Api::class)
+@Composable
+private fun GameScreenScaffold(
+    isLandscape: Boolean,
+    onBack: () -> Unit,
+    players: List<PlayerState>,
+    activeIndex: Int,
+    onReserve: Boolean,
+    pickPlayer: (Int) -> Unit,
+    turnRemainingMs: Long,
+    running: Boolean,
+    onToggle: () -> Unit,
+    onResetTurn: () -> Unit
+) {
+    val topBar = @Composable {
+        TopAppBar(
+            title = { Text("BoardGame Timer – Game") },
+            navigationIcon = {
+                IconButton(onClick = onBack) { Icon(Icons.Default.ArrowBack, contentDescription = "Back") }
+            }
+        )
+    }
+    
+    if (isLandscape) {
+        // Landscape layout: 3 columns with controls on the right
+        Scaffold(topBar = topBar) { inner ->
+            Row(
+                modifier = Modifier.padding(inner).fillMaxSize().padding(8.dp),
+                horizontalArrangement = Arrangement.spacedBy(8.dp)
+            ) {
+                // Player grid takes up 2/3 of the width
+                PlayerGrid(
+                    players = players,
+                    activeIndex = activeIndex,
+                    onReserve = onReserve,
+                    pickPlayer = pickPlayer,
+                    modifier = Modifier.weight(2f).fillMaxHeight()
+                )
+                
+                // Controls column takes up 1/3 of the width
+                ControlsColumn(
+                    turnRemainingMs = turnRemainingMs,
+                    onReserve = onReserve,
+                    reserveRemainingMs = players[activeIndex].remainingReserveMs,
+                    running = running,
+                    onToggle = onToggle,
+                    onResetTurn = onResetTurn,
+                    modifier = Modifier.weight(1f).fillMaxHeight()
+                )
+            }
+        }
+    } else {
+        // Portrait layout: original bottom bar design
+        Scaffold(
+            topBar = topBar,
+            bottomBar = {
+                ControlsBar(
+                    turnRemainingMs = turnRemainingMs,
+                    onReserve = onReserve,
+                    reserveRemainingMs = players[activeIndex].remainingReserveMs,
+                    running = running,
+                    onToggle = onToggle,
+                    onResetTurn = onResetTurn
+                )
+            }
+        ) { inner ->
+            PlayerGrid(
+                players = players,
+                activeIndex = activeIndex,
                 onReserve = onReserve,
-                reserveRemainingMs = players[activeIndex].remainingReserveMs,
-                running = running,
-                onToggle = { running = !running },
-                onResetTurn = { turnRemainingMs = turnTotalMs; onReserve = false }
+                pickPlayer = pickPlayer,
+                modifier = Modifier.padding(inner).fillMaxSize().padding(8.dp)
             )
         }
-    ) { inner ->
-        BoxWithConstraints(
-            modifier = Modifier.padding(inner).fillMaxSize().padding(8.dp)
+    }
+}
+
+@SuppressLint("UnusedBoxWithConstraintsScope")
+@Composable
+private fun PlayerGrid(
+    players: List<PlayerState>,
+    activeIndex: Int,
+    onReserve: Boolean,
+    pickPlayer: (Int) -> Unit,
+    modifier: Modifier = Modifier
+) {
+    BoxWithConstraints(modifier = modifier) {
+        val rows = (players.size + 1) / 2
+        val cellHeight = (maxHeight - (8.dp * (rows - 1))) / rows
+        
+        LazyVerticalGrid(
+            columns = GridCells.Fixed(2),
+            modifier = Modifier.fillMaxSize(),
+            horizontalArrangement = Arrangement.spacedBy(8.dp),
+            verticalArrangement = Arrangement.spacedBy(8.dp),
+            userScrollEnabled = false
         ) {
-            val rows = (players.size + 1) / 2 // Calculate number of rows needed
-            val cellHeight = (maxHeight - (8.dp * (rows - 1))) / rows // Available height divided by rows
-            
-            LazyVerticalGrid(
-                columns = GridCells.Fixed(2),
-                modifier = Modifier.fillMaxSize(),
-                horizontalArrangement = Arrangement.spacedBy(8.dp),
-                verticalArrangement = Arrangement.spacedBy(8.dp),
-                userScrollEnabled = false
-            ) {
-                itemsIndexed(players) { i, p ->
-                    PlayerSlot(
-                        player = p,
-                        isActive = i == activeIndex,
-                        isFlashing = i == activeIndex && onReserve && p.remainingReserveMs == 0L,
-                        onSelect = { pickPlayer(i) },
-                        modifier = Modifier
-                            .fillMaxWidth()
-                            .height(cellHeight)
-                    )
-                }
+            itemsIndexed(players) { i, p ->
+                PlayerSlot(
+                    player = p,
+                    isActive = i == activeIndex,
+                    isFlashing = i == activeIndex && onReserve && p.remainingReserveMs == 0L,
+                    isUsingReserve = i == activeIndex && onReserve && p.remainingReserveMs > 0L,
+                    onSelect = { pickPlayer(i) },
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .height(cellHeight)
+                )
             }
         }
     }
@@ -348,41 +488,116 @@ private fun ControlsBar(
 ) {
     Surface(tonalElevation = 3.dp) {
         Column(
-            Modifier.fillMaxWidth().padding(16.dp),
-            verticalArrangement = Arrangement.spacedBy(12.dp)
+            Modifier.fillMaxWidth().padding(24.dp),
+            verticalArrangement = Arrangement.spacedBy(20.dp)
         ) {
             val label = if (!onReserve) "Turn Time" else "Reserve Time"
             val display = if (!onReserve) formatTime(turnRemainingMs) else formatTime(reserveRemainingMs)
-            Text(
-                text = "$label: $display",
-                style = MaterialTheme.typography.headlineLarge,
-                modifier = Modifier.fillMaxWidth(),
-                textAlign = TextAlign.Center
-            )
+            
+            Column(
+                horizontalAlignment = Alignment.CenterHorizontally,
+                verticalArrangement = Arrangement.spacedBy(8.dp)
+            ) {
+                Text(
+                    text = label,
+                    style = MaterialTheme.typography.headlineMedium,
+                    modifier = Modifier.fillMaxWidth(),
+                    textAlign = TextAlign.Center
+                )
+                Text(
+                    text = display,
+                    style = MaterialTheme.typography.displayMedium,
+                    modifier = Modifier.fillMaxWidth(),
+                    textAlign = TextAlign.Center
+                )
+            }
             Row(
                 Modifier.fillMaxWidth(),
-                horizontalArrangement = Arrangement.spacedBy(12.dp),
+                horizontalArrangement = Arrangement.spacedBy(16.dp),
                 verticalAlignment = Alignment.CenterVertically
             ) {
                 Button(
                     onClick = onToggle, 
-                    modifier = Modifier.weight(1f).height(56.dp)
+                    modifier = Modifier.weight(1f).height(72.dp)
                 ) {
                     Text(
                         text = if (running) "Pause" else "Start",
-                        fontSize = 18.sp
+                        fontSize = 20.sp
                     )
                 }
                 OutlinedButton(
                     onClick = onResetTurn,
-                    modifier = Modifier.height(56.dp).padding(start = 8.dp)
+                    modifier = Modifier.height(72.dp)
                 ) { 
                     Text(
                         text = "Reset Turn",
-                        fontSize = 16.sp
+                        fontSize = 18.sp
                     ) 
                 }
             }
+        }
+    }
+}
+
+@Composable
+private fun ControlsColumn(
+    turnRemainingMs: Long,
+    onReserve: Boolean,
+    reserveRemainingMs: Long,
+    running: Boolean,
+    onToggle: () -> Unit,
+    onResetTurn: () -> Unit,
+    modifier: Modifier = Modifier
+) {
+    Surface(
+        modifier = modifier,
+        tonalElevation = 3.dp
+    ) {
+        Column(
+            Modifier.fillMaxSize().padding(16.dp),
+            verticalArrangement = Arrangement.spacedBy(16.dp),
+            horizontalAlignment = Alignment.CenterHorizontally
+        ) {
+            val label = if (!onReserve) "Turn Time" else "Reserve Time"
+            val display = if (!onReserve) formatTime(turnRemainingMs) else formatTime(reserveRemainingMs)
+            
+            Spacer(Modifier.weight(0.5f))
+            
+            Text(
+                text = label,
+                style = MaterialTheme.typography.headlineLarge,
+                textAlign = TextAlign.Center
+            )
+            
+            Text(
+                text = display,
+                style = MaterialTheme.typography.displayLarge,
+                textAlign = TextAlign.Center
+            )
+            
+            Spacer(Modifier.weight(1f))
+            
+            Button(
+                onClick = onToggle,
+                modifier = Modifier.fillMaxWidth().height(56.dp)
+            ) {
+                Text(
+                    text = if (running) "Pause" else "Start",
+                    fontSize = 18.sp
+                )
+            }
+            
+            OutlinedButton(
+                onClick = onResetTurn,
+                modifier = Modifier.fillMaxWidth().height(56.dp)
+            ) {
+                Text(
+                    text = "Reset Turn",
+                    fontSize = 16.sp
+                )
+            }
+            
+            Spacer(Modifier.weight(0.5f))
         }
     }
 }
@@ -392,15 +607,21 @@ private fun PlayerSlot(
     player: PlayerState,
     isActive: Boolean,
     isFlashing: Boolean,
+    isUsingReserve: Boolean,
     onSelect: () -> Unit,
     modifier: Modifier = Modifier
 ) {
-    val baseColor = if (isActive) Color(0xFFDFF6DD) else Color(0xFFF6F6F6)
-    val borderColor = if (isActive) Color(0xFF2E7D32) else Color(0xFFBDBDBD)
+    // Determine colors based on state
+    val (baseColor, borderColor) = when {
+        isActive && isUsingReserve -> Color(0xFFFFEB3B) to Color(0xFFFF8F00) // Bright yellow for reserve time
+        isActive -> Color(0xFF4CAF50) to Color(0xFF2E7D32) // Bright green for active player
+        else -> Color(0xFFF6F6F6) to Color(0xFFBDBDBD) // Default gray
+    }
+    
     val infinite = rememberInfiniteTransition(label = "flash")
     val animatedColor by if (isFlashing) infinite.animateColor(
-        initialValue = Color(0xFFFFCDD2), // Light red
-        targetValue = Color(0xFFFF5252), // Bright red
+        initialValue = Color(0xFFFF1744), // Bright red
+        targetValue = Color(0xFFD50000), // Even brighter/darker red
         animationSpec = infiniteRepeatable(
             animation = tween(600, easing = FastOutSlowInEasing),
             repeatMode = RepeatMode.Reverse
@@ -409,26 +630,45 @@ private fun PlayerSlot(
     ) else remember { mutableStateOf(baseColor) }
     val bg = if (isFlashing) animatedColor else baseColor
 
-    Column(
+    Box(
         modifier
             .background(bg)
             .border(2.dp, borderColor)
             .clickable(enabled = !isActive) { onSelect() }
-            .padding(16.dp),
-        verticalArrangement = Arrangement.SpaceBetween
+            .padding(16.dp)
+            .fillMaxSize()
     ) {
-        Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween) {
+        // Centered player name and reserve time
+        Column(
+            modifier = Modifier.align(Alignment.Center),
+            verticalArrangement = Arrangement.Center,
+            horizontalAlignment = Alignment.CenterHorizontally
+        ) {
             Text(
-                text = player.name, 
-                fontSize = 24.sp, 
-                fontWeight = FontWeight.Bold
+                text = player.name,
+                fontSize = 32.sp,
+                fontWeight = FontWeight.Bold,
+                textAlign = TextAlign.Center
             )
+            
+            Spacer(modifier = Modifier.height(8.dp))
+            
             Text(
-                text = "Reserve: ${formatTime(player.remainingReserveMs)}", 
-                fontSize = 18.sp,
-                fontWeight = FontWeight.Medium
+                text = formatTime(player.remainingReserveMs),
+                fontSize = 24.sp,
+                fontWeight = FontWeight.Medium,
+                textAlign = TextAlign.Center
             )
         }
+        
+        // Total used time in bottom left corner
+        Text(
+            text = "Used: ${formatTime(player.totalUsedMs)}",
+            fontSize = 10.sp,
+            fontWeight = FontWeight.Light,
+            modifier = Modifier.align(Alignment.BottomStart),
+            color = Color.Gray
+        )
     }
 }
 
